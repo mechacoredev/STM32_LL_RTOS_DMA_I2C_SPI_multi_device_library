@@ -134,8 +134,13 @@ uint8_t rc522_write(rc522_handle_t dev, uint8_t blockAddr, uint8_t* writedata);
 void rc522_halt(rc522_handle_t dev);
 void rc522_stop_crypto1(rc522_handle_t dev);
 
+// ... mevcut kodlar
+void rc522_stop_crypto1(rc522_handle_t dev);
 
-//uint8_t _rc522_read_data(rc522_handle_t dev, uint8_t reg_addr);
+// --- YENİ EKLENEN KESME (IRQ) FONKSİYONLARI ---
+void rc522_assign_interrupt_task(rc522_handle_t dev, osThreadId_t task_handle, uint32_t flag);
+void rc522_set_active_irq_device(rc522_handle_t dev);
+void rc522_irq_handler(void);
 
 
 #endif /* INC_RC522_H_ */
