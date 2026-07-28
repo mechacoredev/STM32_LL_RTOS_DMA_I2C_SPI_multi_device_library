@@ -14,11 +14,34 @@ struct rc522_t{
 	uint32_t cs_pin;
 	GPIO_TypeDef* rst_port;
 	uint32_t rst_pin;
+
+	osThreadId_t interrupt_task_handle;
+	uint32_t interrupt_flag;
+
 };
 
 #define max_rc522_instances 2
 static struct rc522_t rc522_pool[max_rc522_instances];
 static uint8_t rc522_next_free_index = 0;
+
+/* rc522.c dosyasının başlarına bir yere ekle */
+static rc522_handle_t active_rc522_irq_device = NULL;
+
+void rc522_assign_interrupt_task(rc522_handle_t dev, osThreadId_t task_handle, uint32_t flag){
+	dev->interrupt_task_handle = task_handle;
+	dev->interrupt_flag = flag;
+}
+
+void rc522_set_active_irq_device(rc522_handle_t dev){
+	active_rc522_irq_device = dev;
+}
+
+void rc522_irq_handler(void){
+	if(active_rc522_irq_device == NULL) return;
+	if(active_rc522_irq_device->interrupt_task_handle == NULL) return;
+	osThreadFlagsSet(active_rc522_irq_device->interrupt_task_handle, active_rc522_irq_device->interrupt_flag);
+}
+
 
 // --- Ham SPI erişim katmanı (spi_manager üzerinden) ---
 
@@ -82,12 +105,14 @@ rc522_handle_t rc522_init(rc522_user_configs* config){
 	osDelay(50);
 
 	_rc522_reset(dev);
+	_rc522_set_bitmask(dev, REG_DivlEnReg, 0x80);
 	_rc522_write_data(dev, REG_TModeReg, 0x8D);
 	_rc522_write_data(dev, REG_TPrescalerReg, 0x3E);
 	_rc522_write_data(dev, REG_TReloadReg_LSB, 30);
 	_rc522_write_data(dev, REG_TReloadReg_MSB, 0);
 	_rc522_write_data(dev, REG_TxASKReg, 0x40);
 	_rc522_write_data(dev, REG_ModeReg, 0x3D);
+	_rc522_set_bitmask(dev, REG_DivlEnReg, 0x80); // pull-up için eklendi
 	_rc522_antenna_on(dev);
 
 	return dev;
@@ -103,21 +128,26 @@ static uint8_t _rc522_to_card(rc522_handle_t dev, uint8_t command, uint8_t* send
 	uint8_t irqen = 0;
 	uint32_t i;
 
+	// KATI RTOS KURALI: Eğer Interrupt Görevi atanmamışsa, sistemi kitleme, direkt reddet!
+	if (dev->interrupt_task_handle == NULL) {
+		return MI_ERROR;
+	}
+
 	switch(command){
 		case PCD_MFAUTHENT:
-			irqen = 0x12;
 			waitirq = 0x10;
+			irqen = waitirq | 0x01;
 			break;
 		case PCD_TRANSCEIVE:
-			irqen = 0x77;
 			waitirq = 0x30;
+			irqen = waitirq | 0x01;
 			break;
 		default:
 			break;
 	}
 
 	_rc522_write_data(dev, REG_ComlEnReg, irqen | 0x80);
-	_rc522_clear_bitmask(dev, REG_ComIrqReg, 0x80);
+	_rc522_write_data(dev, REG_ComIrqReg, 0x7F);
 	_rc522_set_bitmask(dev, REG_FIFOLevelReg, 0x80);
 	_rc522_write_data(dev, REG_CommandReg, PCD_IDLE);
 
@@ -125,19 +155,32 @@ static uint8_t _rc522_to_card(rc522_handle_t dev, uint8_t command, uint8_t* send
 		_rc522_write_data(dev, REG_FIFODataReg, senddata[i]);
 	}
 
+	osThreadFlagsClear(dev->interrupt_flag);
+
 	_rc522_write_data(dev, REG_CommandReg, command);
 	if(command == PCD_TRANSCEIVE){
 		_rc522_set_bitmask(dev, REG_BitFramingReg, 0x80);
 	}
 
-	i = 200;
-	do{
-		n = _rc522_read_data(dev, REG_ComIrqReg);
-		i--;
-	} while((i != 0) && !(n & 0x01) && !(n & waitirq));
+	// --- %100 SAF RTOS MİMARİSİ (POLLING TAMAMEN SİLİNDİ) ---
+	uint32_t flags = osThreadFlagsWait(dev->interrupt_flag, osFlagsWaitAny, 40);
+
+	n = _rc522_read_data(dev, REG_ComIrqReg);
+	_rc522_write_data(dev, REG_ComIrqReg, 0x7F);
+
+	if (flags == osFlagsErrorTimeout) {
+		i = 0;
+		_rc522_write_data(dev, REG_CommandReg, PCD_IDLE);
+	} else {
+		if (n & waitirq) {
+			i = 1;
+		} else {
+			i = 0;
+		}
+	}
 
 	_rc522_clear_bitmask(dev, REG_BitFramingReg, 0x80);
-	// burada i değeri 0 oluyor.
+
 	if(i != 0){
 		if(!(_rc522_read_data(dev, REG_ErrorReg) & 0x1B)){
 			if(n & 0x01 & irqen){
