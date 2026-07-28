@@ -73,6 +73,9 @@ void Error_Handler(void);
 #define rc522_cs_pin_GPIO_Port GPIOC
 #define rc522_rst_pin_Pin LL_GPIO_PIN_5
 #define rc522_rst_pin_GPIO_Port GPIOC
+#define rc522_irq_pin_Pin LL_GPIO_PIN_1
+#define rc522_irq_pin_GPIO_Port GPIOB
+#define rc522_irq_pin_EXTI_IRQn EXTI1_IRQn
 #define mpu6050_irq_pin_Pin LL_GPIO_PIN_9
 #define mpu6050_irq_pin_GPIO_Port GPIOE
 #define mpu6050_irq_pin_EXTI_IRQn EXTI9_5_IRQn
