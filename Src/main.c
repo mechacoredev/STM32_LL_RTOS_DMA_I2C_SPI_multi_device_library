@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "bme280.h"
 #include "rc522.h"
+#include "nrf24l01.h"
 #include "mpu6050.h"
 #include "string.h"
 /* USER CODE END Includes */
@@ -73,6 +74,20 @@ const osThreadAttr_t mpu6050task_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for nrf24l01TXtask */
+osThreadId_t nrf24l01TXtaskHandle;
+const osThreadAttr_t nrf24l01TXtask_attributes = {
+  .name = "nrf24l01TXtask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for nrf24l01RXtask */
+osThreadId_t nrf24l01RXtaskHandle;
+const osThreadAttr_t nrf24l01RXtask_attributes = {
+  .name = "nrf24l01RXtask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for i2c_mutex */
 osMutexId_t i2c_mutexHandle;
 const osMutexAttr_t i2c_mutex_attributes = {
@@ -82,6 +97,11 @@ const osMutexAttr_t i2c_mutex_attributes = {
 osMutexId_t spi_mutexHandle;
 const osMutexAttr_t spi_mutex_attributes = {
   .name = "spi_mutex"
+};
+/* Definitions for spi3_mutex */
+osMutexId_t spi3_mutexHandle;
+const osMutexAttr_t spi3_mutex_attributes = {
+  .name = "spi3_mutex"
 };
 /* Definitions for dma_semaphore */
 osSemaphoreId_t dma_semaphoreHandle;
@@ -93,11 +113,19 @@ osSemaphoreId_t spi_semaphoreHandle;
 const osSemaphoreAttr_t spi_semaphore_attributes = {
   .name = "spi_semaphore"
 };
+/* Definitions for spi3_semaphore */
+osSemaphoreId_t spi3_semaphoreHandle;
+const osSemaphoreAttr_t spi3_semaphore_attributes = {
+  .name = "spi3_semaphore"
+};
 /* USER CODE BEGIN PV */
 bme280_handle_t my_bme280 = NULL;
 rc522_handle_t my_rc522 = NULL;
 mpu6050_handle_t my_mpu6050 = NULL;
+nrf24l01_handle_t my_nrf2401 = NULL;
 uint8_t sayac=0;
+nrf24l01_handle_t my_nrf_tx = NULL;
+nrf24l01_handle_t my_nrf_rx = NULL;
 
 osMessageQueueId_t i2c_job_queueHandle;
 const osMessageQueueAttr_t i2c_job_queue_attributes = {
@@ -111,10 +139,13 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_SPI3_Init(void);
 void startbme280task(void *argument);
 void startsensorhubtask(void *argument);
 void startrc522task(void *argument);
 void startmpu6050task(void *argument);
+void startnrf24l01TXtask(void *argument);
+void startnrf24l01RXtask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -157,6 +188,7 @@ int main(void)
   MX_DMA_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
+  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -170,6 +202,9 @@ int main(void)
   /* creation of spi_mutex */
   spi_mutexHandle = osMutexNew(&spi_mutex_attributes);
 
+  /* creation of spi3_mutex */
+  spi3_mutexHandle = osMutexNew(&spi3_mutex_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
@@ -181,10 +216,14 @@ int main(void)
   /* creation of spi_semaphore */
   spi_semaphoreHandle = osSemaphoreNew(1, 1, &spi_semaphore_attributes);
 
+  /* creation of spi3_semaphore */
+  spi3_semaphoreHandle = osSemaphoreNew(1, 1, &spi3_semaphore_attributes);
+
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
   i2c_manager_assign_bus(I2C1, i2c_mutexHandle, dma_semaphoreHandle);
   spi_manager_assign_bus(SPI1, spi_mutexHandle, spi_semaphoreHandle);
+  spi_manager_assign_bus(SPI3, spi3_mutexHandle, spi3_semaphoreHandle);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -197,16 +236,22 @@ int main(void)
 
   /* Create the thread(s) */
   /* creation of bme280task */
-  bme280taskHandle = osThreadNew(startbme280task, NULL, &bme280task_attributes);
+  //bme280taskHandle = osThreadNew(startbme280task, NULL, &bme280task_attributes);
 
   /* creation of sensorhubtask */
   sensorhubtaskHandle = osThreadNew(startsensorhubtask, NULL, &sensorhubtask_attributes);
 
   /* creation of rc522task */
-  rc522taskHandle = osThreadNew(startrc522task, NULL, &rc522task_attributes);
+  //rc522taskHandle = osThreadNew(startrc522task, NULL, &rc522task_attributes);
 
   /* creation of mpu6050task */
-  mpu6050taskHandle = osThreadNew(startmpu6050task, NULL, &mpu6050task_attributes);
+  //mpu6050taskHandle = osThreadNew(startmpu6050task, NULL, &mpu6050task_attributes);
+
+  /* creation of nrf24l01TXtask */
+  nrf24l01TXtaskHandle = osThreadNew(startnrf24l01TXtask, NULL, &nrf24l01TXtask_attributes);
+
+  /* creation of nrf24l01RXtask */
+  nrf24l01RXtaskHandle = osThreadNew(startnrf24l01RXtask, NULL, &nrf24l01RXtask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -463,6 +508,105 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief SPI3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI3_Init(void)
+{
+
+  /* USER CODE BEGIN SPI3_Init 0 */
+
+  /* USER CODE END SPI3_Init 0 */
+
+  LL_SPI_InitTypeDef SPI_InitStruct = {0};
+
+  LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* Peripheral clock enable */
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_SPI3);
+
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOC);
+  /**SPI3 GPIO Configuration
+  PC10   ------> SPI3_SCK
+  PC11   ------> SPI3_MISO
+  PC12   ------> SPI3_MOSI
+  */
+  GPIO_InitStruct.Pin = LL_GPIO_PIN_10|LL_GPIO_PIN_11|LL_GPIO_PIN_12;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  GPIO_InitStruct.Alternate = LL_GPIO_AF_6;
+  LL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* SPI3 DMA Init */
+
+  /* SPI3_TX Init */
+  LL_DMA_SetChannelSelection(DMA1, LL_DMA_STREAM_5, LL_DMA_CHANNEL_0);
+
+  LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_STREAM_5, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+
+  LL_DMA_SetStreamPriorityLevel(DMA1, LL_DMA_STREAM_5, LL_DMA_PRIORITY_LOW);
+
+  LL_DMA_SetMode(DMA1, LL_DMA_STREAM_5, LL_DMA_MODE_NORMAL);
+
+  LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_STREAM_5, LL_DMA_PERIPH_NOINCREMENT);
+
+  LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_STREAM_5, LL_DMA_MEMORY_INCREMENT);
+
+  LL_DMA_SetPeriphSize(DMA1, LL_DMA_STREAM_5, LL_DMA_PDATAALIGN_BYTE);
+
+  LL_DMA_SetMemorySize(DMA1, LL_DMA_STREAM_5, LL_DMA_MDATAALIGN_BYTE);
+
+  LL_DMA_DisableFifoMode(DMA1, LL_DMA_STREAM_5);
+
+  /* SPI3_RX Init */
+  LL_DMA_SetChannelSelection(DMA1, LL_DMA_STREAM_2, LL_DMA_CHANNEL_0);
+
+  LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_STREAM_2, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+
+  LL_DMA_SetStreamPriorityLevel(DMA1, LL_DMA_STREAM_2, LL_DMA_PRIORITY_LOW);
+
+  LL_DMA_SetMode(DMA1, LL_DMA_STREAM_2, LL_DMA_MODE_NORMAL);
+
+  LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_STREAM_2, LL_DMA_PERIPH_NOINCREMENT);
+
+  LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_STREAM_2, LL_DMA_MEMORY_INCREMENT);
+
+  LL_DMA_SetPeriphSize(DMA1, LL_DMA_STREAM_2, LL_DMA_PDATAALIGN_BYTE);
+
+  LL_DMA_SetMemorySize(DMA1, LL_DMA_STREAM_2, LL_DMA_MDATAALIGN_BYTE);
+
+  LL_DMA_DisableFifoMode(DMA1, LL_DMA_STREAM_2);
+
+  /* SPI3 interrupt Init */
+  NVIC_SetPriority(SPI3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
+  NVIC_EnableIRQ(SPI3_IRQn);
+
+  /* USER CODE BEGIN SPI3_Init 1 */
+
+  /* USER CODE END SPI3_Init 1 */
+  /* SPI3 parameter configuration*/
+  SPI_InitStruct.TransferDirection = LL_SPI_FULL_DUPLEX;
+  SPI_InitStruct.Mode = LL_SPI_MODE_MASTER;
+  SPI_InitStruct.DataWidth = LL_SPI_DATAWIDTH_8BIT;
+  SPI_InitStruct.ClockPolarity = LL_SPI_POLARITY_LOW;
+  SPI_InitStruct.ClockPhase = LL_SPI_PHASE_1EDGE;
+  SPI_InitStruct.NSS = LL_SPI_NSS_SOFT;
+  SPI_InitStruct.BaudRate = LL_SPI_BAUDRATEPRESCALER_DIV8;
+  SPI_InitStruct.BitOrder = LL_SPI_MSB_FIRST;
+  SPI_InitStruct.CRCCalculation = LL_SPI_CRCCALCULATION_DISABLE;
+  SPI_InitStruct.CRCPoly = 10;
+  LL_SPI_Init(SPI3, &SPI_InitStruct);
+  LL_SPI_SetStandard(SPI3, LL_SPI_PROTOCOL_MOTOROLA);
+  /* USER CODE BEGIN SPI3_Init 2 */
+
+  /* USER CODE END SPI3_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -477,6 +621,12 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream0_IRQn interrupt configuration */
   NVIC_SetPriority(DMA1_Stream0_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
   NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream2_IRQn interrupt configuration */
+  NVIC_SetPriority(DMA1_Stream2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
+  NVIC_EnableIRQ(DMA1_Stream2_IRQn);
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  NVIC_SetPriority(DMA1_Stream5_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
+  NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   NVIC_SetPriority(DMA2_Stream0_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
   NVIC_EnableIRQ(DMA2_Stream0_IRQn);
@@ -504,29 +654,93 @@ static void MX_GPIO_Init(void)
   LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOC);
   LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
   LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOE);
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOD);
 
   /**/
-  LL_GPIO_SetOutputPin(rc522_cs_pin_GPIO_Port, rc522_cs_pin_Pin);
+  LL_GPIO_ResetOutputPin(nrf24_ce_pin_spi1_GPIO_Port, nrf24_ce_pin_spi1_Pin);
+
+  /**/
+  LL_GPIO_SetOutputPin(nrf24_csn_pin_spi1_GPIO_Port, nrf24_csn_pin_spi1_Pin);
 
   /**/
   LL_GPIO_ResetOutputPin(rc522_rst_pin_GPIO_Port, rc522_rst_pin_Pin);
 
   /**/
-  GPIO_InitStruct.Pin = rc522_cs_pin_Pin|rc522_rst_pin_Pin;
+  LL_GPIO_SetOutputPin(nrf24_csn_pin_spi3_GPIO_Port, nrf24_csn_pin_spi3_Pin);
+  LL_GPIO_ResetOutputPin(nrf24_ce_pin_spi3_GPIO_Port, nrf24_ce_pin_spi3_Pin);
+
+  /**/
+  LL_GPIO_SetOutputPin(rc522_cs_pin_GPIO_Port, rc522_cs_pin_Pin);
+
+  /**/
+  GPIO_InitStruct.Pin = nrf24_ce_pin_spi1_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_MEDIUM;
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  LL_GPIO_Init(nrf24_ce_pin_spi1_GPIO_Port, &GPIO_InitStruct);
+
+  /**/
+  GPIO_InitStruct.Pin = rc522_cs_pin_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_MEDIUM;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(rc522_cs_pin_GPIO_Port, &GPIO_InitStruct);
+
+  /**/
+  GPIO_InitStruct.Pin = nrf24_csn_pin_spi1_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(nrf24_csn_pin_spi1_GPIO_Port, &GPIO_InitStruct);
+
+  /**/
+  GPIO_InitStruct.Pin = rc522_rst_pin_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_MEDIUM;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(rc522_rst_pin_GPIO_Port, &GPIO_InitStruct);
+
+  /**/
+  GPIO_InitStruct.Pin = nrf24_csn_pin_spi3_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(nrf24_csn_pin_spi3_GPIO_Port, &GPIO_InitStruct);
+
+  /**/
+  GPIO_InitStruct.Pin = nrf24_ce_pin_spi3_Pin;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_MEDIUM;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(nrf24_ce_pin_spi3_GPIO_Port, &GPIO_InitStruct);
 
   /**/
   LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTB, LL_SYSCFG_EXTI_LINE1);
 
   /**/
+  LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTE, LL_SYSCFG_EXTI_LINE7);
+
+  /**/
   LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTE, LL_SYSCFG_EXTI_LINE9);
 
   /**/
+  LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTD, LL_SYSCFG_EXTI_LINE2);
+
+  /**/
   EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_1;
+  EXTI_InitStruct.LineCommand = ENABLE;
+  EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
+  EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_FALLING;
+  LL_EXTI_Init(&EXTI_InitStruct);
+
+  /**/
+  EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_7;
   EXTI_InitStruct.LineCommand = ENABLE;
   EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
   EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_FALLING;
@@ -540,10 +754,26 @@ static void MX_GPIO_Init(void)
   LL_EXTI_Init(&EXTI_InitStruct);
 
   /**/
+  EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_2;
+  EXTI_InitStruct.LineCommand = ENABLE;
+  EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
+  EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_FALLING;
+  LL_EXTI_Init(&EXTI_InitStruct);
+
+  /**/
+  LL_GPIO_SetPinPull(nrf24_irq_pin_spi1_GPIO_Port, nrf24_irq_pin_spi1_Pin, LL_GPIO_PULL_UP);
+
+  /**/
   LL_GPIO_SetPinPull(rc522_irq_pin_GPIO_Port, rc522_irq_pin_Pin, LL_GPIO_PULL_UP);
 
   /**/
   LL_GPIO_SetPinPull(mpu6050_irq_pin_GPIO_Port, mpu6050_irq_pin_Pin, LL_GPIO_PULL_DOWN);
+
+  /**/
+  LL_GPIO_SetPinPull(nrf24_irq_pin_spi3_GPIO_Port, nrf24_irq_pin_spi3_Pin, LL_GPIO_PULL_UP);
+
+  /**/
+  LL_GPIO_SetPinMode(nrf24_irq_pin_spi1_GPIO_Port, nrf24_irq_pin_spi1_Pin, LL_GPIO_MODE_INPUT);
 
   /**/
   LL_GPIO_SetPinMode(rc522_irq_pin_GPIO_Port, rc522_irq_pin_Pin, LL_GPIO_MODE_INPUT);
@@ -551,9 +781,14 @@ static void MX_GPIO_Init(void)
   /**/
   LL_GPIO_SetPinMode(mpu6050_irq_pin_GPIO_Port, mpu6050_irq_pin_Pin, LL_GPIO_MODE_INPUT);
 
+  /**/
+  LL_GPIO_SetPinMode(nrf24_irq_pin_spi3_GPIO_Port, nrf24_irq_pin_spi3_Pin, LL_GPIO_MODE_INPUT);
+
   /* EXTI interrupt init*/
   NVIC_SetPriority(EXTI1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
   NVIC_EnableIRQ(EXTI1_IRQn);
+  NVIC_SetPriority(EXTI2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
+  NVIC_EnableIRQ(EXTI2_IRQn);
   NVIC_SetPriority(EXTI9_5_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),5, 0));
   NVIC_EnableIRQ(EXTI9_5_IRQn);
 
@@ -871,6 +1106,98 @@ void startmpu6050task(void *argument)
 	  }
   }
   /* USER CODE END startmpu6050task */
+}
+
+/* USER CODE BEGIN Header_startnrf24l01TXtask */
+/**
+* @brief Function implementing the nrf24l01TXtask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_startnrf24l01TXtask */
+void startnrf24l01TXtask(void *argument)
+{
+  /* USER CODE BEGIN startnrf24l01TXtask */
+  while(osSemaphoreAcquire(spi3_semaphoreHandle, 0) == osOK) { }
+
+  nrf24l01_user_configs tx_cfg = {0};
+  tx_cfg.spi_handle = SPI3;
+  tx_cfg.dma_handle = DMA1;
+  tx_cfg.rx_stream = LL_DMA_STREAM_2;
+  tx_cfg.tx_stream = LL_DMA_STREAM_5;
+  tx_cfg.csn_port = nrf24_csn_pin_spi3_GPIO_Port;
+  tx_cfg.csn_pin = nrf24_csn_pin_spi3_Pin;
+  tx_cfg.ce_port = nrf24_ce_pin_spi3_GPIO_Port;
+  tx_cfg.ce_pin = nrf24_ce_pin_spi3_Pin;
+  tx_cfg.spi_semaphore = spi3_semaphoreHandle;
+
+  my_nrf_tx = nrf24l01_init(&tx_cfg);
+  if(my_nrf_tx == NULL) {
+    for(;;) { osDelay(1000); }
+  }
+
+  nrf24l01_assign_interrupt_task(my_nrf_tx, nrf24l01TXtaskHandle, 0x01);
+
+  // RX taskinin init ve listening islemlerini tamamlamasina zaman ver.
+  osDelay(100);
+
+  const uint8_t tx_msg[] = "iron man";
+  /* Infinite loop */
+  for(;;)
+  {
+    (void)nrf24l01_send_dma(my_nrf_tx, (uint8_t *)tx_msg, sizeof(tx_msg) - 1U);
+    osDelay(100);
+  }
+  /* USER CODE END startnrf24l01TXtask */
+}
+
+/* USER CODE BEGIN Header_startnrf24l01RXtask */
+/**
+* @brief Function implementing the nrf24l01RXtask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_startnrf24l01RXtask */
+void startnrf24l01RXtask(void *argument)
+{
+  /* USER CODE BEGIN startnrf24l01RXtask */
+  while(osSemaphoreAcquire(spi_semaphoreHandle, 0) == osOK) { }
+
+  nrf24l01_user_configs rx_cfg = {0};
+  rx_cfg.spi_handle = SPI1;
+  rx_cfg.dma_handle = DMA2;
+  rx_cfg.rx_stream = LL_DMA_STREAM_0;
+  rx_cfg.tx_stream = LL_DMA_STREAM_3;
+  rx_cfg.csn_port = nrf24_csn_pin_spi1_GPIO_Port;
+  rx_cfg.csn_pin = nrf24_csn_pin_spi1_Pin;
+  rx_cfg.ce_port = nrf24_ce_pin_spi1_GPIO_Port;
+  rx_cfg.ce_pin = nrf24_ce_pin_spi1_Pin;
+  rx_cfg.spi_semaphore = spi_semaphoreHandle;
+
+  my_nrf_rx = nrf24l01_init(&rx_cfg);
+  if(my_nrf_rx == NULL) {
+    for(;;) { osDelay(1000); }
+  }
+
+  nrf24l01_assign_interrupt_task(my_nrf_rx, nrf24l01RXtaskHandle, 0x01);
+  osThreadFlagsClear(0x01);
+  nrf24l01_clear_interrupts(my_nrf_rx);
+  nrf24l01_start_listening(my_nrf_rx);
+
+  uint8_t rx_buffer[32] = {0};
+  /* Infinite loop */
+  for(;;)
+  {
+    uint32_t flags = osThreadFlagsWait(0x01, osFlagsWaitAny, osWaitForever);
+    if(((flags & osFlagsError) == 0U) && ((flags & 0x01U) != 0U))
+    {
+      if(nrf24l01_receive_dma(my_nrf_rx, rx_buffer, sizeof(rx_buffer)) == _nrf24l01_ok)
+      {
+        sayac++;
+      }
+    }
+  }
+  /* USER CODE END startnrf24l01RXtask */
 }
 
 /**
