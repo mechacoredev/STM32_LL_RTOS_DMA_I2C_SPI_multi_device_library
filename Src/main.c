@@ -74,6 +74,13 @@ const osThreadAttr_t mpu6050task_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for spidmatask */
+osThreadId_t spidmataskHandle;
+const osThreadAttr_t spidmatask_attributes = {
+  .name = "spidmatask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
 /* Definitions for nrf24l01TXtask */
 osThreadId_t nrf24l01TXtaskHandle;
 const osThreadAttr_t nrf24l01TXtask_attributes = {
@@ -126,10 +133,20 @@ nrf24l01_handle_t my_nrf2401 = NULL;
 uint8_t sayac=0;
 nrf24l01_handle_t my_nrf_tx = NULL;
 nrf24l01_handle_t my_nrf_rx = NULL;
+volatile uint32_t nrf_tx_success_count = 0;
+volatile uint32_t nrf_tx_error_count = 0;
+volatile uint32_t nrf_rx_packet_count = 0;
+volatile uint8_t nrf_rx_fifo_count = 0;
+volatile bool nrf_rx_fifo_was_full = false;
+uint8_t nrf_rx_fifo[NRF24L01_FIFO_DEPTH][NRF24L01_PAYLOAD_SIZE] = {0};
 
 osMessageQueueId_t i2c_job_queueHandle;
 const osMessageQueueAttr_t i2c_job_queue_attributes = {
   .name = "i2c_job_queue"
+};
+osMessageQueueId_t spi_job_queueHandle;
+const osMessageQueueAttr_t spi_job_queue_attributes = {
+  .name = "spi_job_queue"
 };
 /* USER CODE END PV */
 
@@ -144,6 +161,7 @@ void startbme280task(void *argument);
 void startsensorhubtask(void *argument);
 void startrc522task(void *argument);
 void startmpu6050task(void *argument);
+void startspidmatask(void *argument);
 void startnrf24l01TXtask(void *argument);
 void startnrf24l01RXtask(void *argument);
 
@@ -232,6 +250,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
   i2c_job_queueHandle = osMessageQueueNew(8, sizeof(i2c_job_t), &i2c_job_queue_attributes);
+  spi_job_queueHandle = osMessageQueueNew(8, sizeof(spi_job_t), &spi_job_queue_attributes);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -246,6 +265,9 @@ int main(void)
 
   /* creation of mpu6050task */
   //mpu6050taskHandle = osThreadNew(startmpu6050task, NULL, &mpu6050task_attributes);
+
+  /* creation of spidmatask */
+  spidmataskHandle = osThreadNew(startspidmatask, NULL, &spidmatask_attributes);
 
   /* creation of nrf24l01TXtask */
   nrf24l01TXtaskHandle = osThreadNew(startnrf24l01TXtask, NULL, &nrf24l01TXtask_attributes);
@@ -1108,6 +1130,59 @@ void startmpu6050task(void *argument)
   /* USER CODE END startmpu6050task */
 }
 
+/* USER CODE BEGIN Header_startspidmatask */
+/**
+* @brief Function implementing the central SPI DMA worker thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_startspidmatask */
+void startspidmatask(void *argument)
+{
+  /* USER CODE BEGIN startspidmatask */
+  // CubeMX binary semaphore'lari baslangicta dolu olabildigi icin temizle.
+  while(osSemaphoreAcquire(spi_semaphoreHandle, 0) == osOK) { }
+  while(osSemaphoreAcquire(spi3_semaphoreHandle, 0) == osOK) { }
+
+  for(;;)
+  {
+    spi_job_t job;
+    osStatus_t queue_status;
+    queue_status = osMessageQueueGet(spi_job_queueHandle, &job, NULL, osWaitForever);
+    if(queue_status != osOK) continue;
+
+    uint32_t result_flag = job.error_flag;
+    spi_manager_return_status transfer_status;
+    transfer_status = spi_manager_transfer_dma(job.spi_handle, job.dma_handle,
+                                               job.rx_stream, job.tx_stream,
+                                               job.cs_port, job.cs_pin,
+                                               job.txdata, job.rxdata, job.size);
+    if(transfer_status == _spi_manager_ok)
+    {
+      osStatus_t semaphore_status;
+      semaphore_status = osSemaphoreAcquire(job.completion_semaphore, 500);
+      if(semaphore_status == osOK)
+      {
+        bool transfer_succeeded;
+        transfer_succeeded = spi_manager_last_transfer_succeeded(job.spi_handle);
+        if(transfer_succeeded){
+          result_flag = job.notify_flag;
+        }
+        spi_manager_unlock_bus(job.spi_handle);
+      }
+      else
+      {
+        spi_manager_abort_transfer(job.spi_handle);
+      }
+    }
+
+    if(job.notify_task != NULL && result_flag != 0){
+      osThreadFlagsSet(job.notify_task, result_flag);
+    }
+  }
+  /* USER CODE END startspidmatask */
+}
+
 /* USER CODE BEGIN Header_startnrf24l01TXtask */
 /**
 * @brief Function implementing the nrf24l01TXtask thread.
@@ -1118,8 +1193,6 @@ void startmpu6050task(void *argument)
 void startnrf24l01TXtask(void *argument)
 {
   /* USER CODE BEGIN startnrf24l01TXtask */
-  while(osSemaphoreAcquire(spi3_semaphoreHandle, 0) == osOK) { }
-
   nrf24l01_user_configs tx_cfg = {0};
   tx_cfg.spi_handle = SPI3;
   tx_cfg.dma_handle = DMA1;
@@ -1137,6 +1210,7 @@ void startnrf24l01TXtask(void *argument)
   }
 
   nrf24l01_assign_interrupt_task(my_nrf_tx, nrf24l01TXtaskHandle, 0x01);
+  osThreadFlagsClear(0x07);
 
   // RX taskinin init ve listening islemlerini tamamlamasina zaman ver.
   osDelay(100);
@@ -1145,8 +1219,81 @@ void startnrf24l01TXtask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    (void)nrf24l01_send_dma(my_nrf_tx, (uint8_t *)tx_msg, sizeof(tx_msg) - 1U);
-    osDelay(100);
+    spi_job_t job;
+    nrf24l01_return_status nrf_status;
+    nrf_status = nrf24l01_build_tx_job(my_nrf_tx, tx_msg, sizeof(tx_msg) - 1,
+                                      nrf24l01TXtaskHandle, 0x02, 0x04, &job);
+    if(nrf_status != _nrf24l01_ok)
+    {
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+      osDelay(1000);
+      continue;
+    }
+
+    osStatus_t queue_status;
+    queue_status = osMessageQueuePut(spi_job_queueHandle, &job, 0, 100);
+    if(queue_status != osOK)
+    {
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+      osDelay(1000);
+      continue;
+    }
+
+    uint32_t dma_flags = osThreadFlagsWait(0x06, osFlagsWaitAny, 500);
+    bool dma_wait_error = (dma_flags & osFlagsError) != 0;
+    bool dma_finished = (dma_flags & 0x02) != 0;
+    if(dma_wait_error || dma_finished == false)
+    {
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+      osDelay(1000);
+      continue;
+    }
+
+    osThreadFlagsClear(0x01);
+    nrf_status = nrf24l01_trigger_transmission(my_nrf_tx);
+    if(nrf_status != _nrf24l01_ok)
+    {
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+      osDelay(1000);
+      continue;
+    }
+
+    uint32_t irq_flags = osThreadFlagsWait(0x01, osFlagsWaitAny, 200);
+    bool irq_wait_error = (irq_flags & osFlagsError) != 0;
+    bool irq_arrived = (irq_flags & 0x01) != 0;
+    if(irq_wait_error || irq_arrived == false)
+    {
+      nrf24l01_clear_interrupts(my_nrf_tx);
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+      osDelay(1000);
+      continue;
+    }
+
+    nrf24l01_irq_status_t irq_status;
+    nrf_status = nrf24l01_get_irq_status(my_nrf_tx, &irq_status);
+    if(nrf_status != _nrf24l01_ok)
+    {
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+      osDelay(1000);
+      continue;
+    }
+
+    nrf24l01_clear_irq_sources(my_nrf_tx, irq_status.raw);
+    if(irq_status.tx_ds){
+      nrf_tx_success_count++;
+    }
+    else if(irq_status.max_rt){
+      flush_tx(my_nrf_tx);
+      nrf_tx_error_count++;
+    }
+
+    osDelay(1000);
   }
   /* USER CODE END startnrf24l01TXtask */
 }
@@ -1161,8 +1308,6 @@ void startnrf24l01TXtask(void *argument)
 void startnrf24l01RXtask(void *argument)
 {
   /* USER CODE BEGIN startnrf24l01RXtask */
-  while(osSemaphoreAcquire(spi_semaphoreHandle, 0) == osOK) { }
-
   nrf24l01_user_configs rx_cfg = {0};
   rx_cfg.spi_handle = SPI1;
   rx_cfg.dma_handle = DMA2;
@@ -1180,21 +1325,75 @@ void startnrf24l01RXtask(void *argument)
   }
 
   nrf24l01_assign_interrupt_task(my_nrf_rx, nrf24l01RXtaskHandle, 0x01);
-  osThreadFlagsClear(0x01);
+  osThreadFlagsClear(0x07);
   nrf24l01_clear_interrupts(my_nrf_rx);
   nrf24l01_start_listening(my_nrf_rx);
 
-  uint8_t rx_buffer[32] = {0};
   /* Infinite loop */
   for(;;)
   {
     uint32_t flags = osThreadFlagsWait(0x01, osFlagsWaitAny, osWaitForever);
-    if(((flags & osFlagsError) == 0U) && ((flags & 0x01U) != 0U))
+    bool flag_wait_error = (flags & osFlagsError) != 0;
+    bool interrupt_arrived = (flags & 0x01) != 0;
+    if(flag_wait_error || interrupt_arrived == false) continue;
+
+    nrf24l01_irq_status_t irq_status = {0};
+    nrf24l01_return_status nrf_status;
+    nrf_status = nrf24l01_get_irq_status(my_nrf_rx, &irq_status);
+    if(nrf_status != _nrf24l01_ok) continue;
+
+    if(irq_status.rx_dr == false)
     {
-      if(nrf24l01_receive_dma(my_nrf_rx, rx_buffer, sizeof(rx_buffer)) == _nrf24l01_ok)
-      {
-        sayac++;
-      }
+      nrf24l01_clear_irq_sources(my_nrf_rx, irq_status.raw);
+      continue;
+    }
+
+    nrf_rx_fifo_count = 0;
+    nrf24l01_fifo_status_t fifo_status;
+    nrf_status = nrf24l01_get_fifo_status(my_nrf_rx, &fifo_status);
+    if(nrf_status != _nrf24l01_ok) continue;
+
+    // nRF24L01 ayri bir FIFO-full interrupt'i uretmez.
+    // RX_DR geldikten sonra RX_FULL biti, FIFO'nun 3 paket dolu oldugunu gosterir.
+    nrf_rx_fifo_was_full = fifo_status.rx_full;
+
+    // FIFO doluysa 3 paket; dolu degilse o anda bulunan 1 veya 2 paket okunur.
+    while(fifo_status.rx_empty == false &&
+          nrf_rx_fifo_count < NRF24L01_FIFO_DEPTH)
+    {
+      spi_job_t job;
+      nrf_status = nrf24l01_build_rx_fifo_job(my_nrf_rx, nrf24l01RXtaskHandle,
+                                              0x02, 0x04, &job);
+      if(nrf_status != _nrf24l01_ok) break;
+
+      osStatus_t queue_status;
+      queue_status = osMessageQueuePut(spi_job_queueHandle, &job, 0, 100);
+      if(queue_status != osOK) break;
+
+      uint32_t dma_flags = osThreadFlagsWait(0x06, osFlagsWaitAny, 500);
+      bool dma_wait_error = (dma_flags & osFlagsError) != 0;
+      bool dma_finished = (dma_flags & 0x02) != 0;
+      if(dma_wait_error || dma_finished == false) break;
+
+      nrf_status = nrf24l01_finish_rx_fifo_job(my_nrf_rx,
+                                               nrf_rx_fifo[nrf_rx_fifo_count],
+                                               NRF24L01_PAYLOAD_SIZE);
+      if(nrf_status != _nrf24l01_ok) break;
+
+      nrf_rx_fifo_count++;
+      nrf_rx_packet_count++;
+      sayac++;
+
+      // Datasheet sirasi: payload oku, RX_DR temizle, FIFO_STATUS kontrol et.
+      nrf24l01_clear_irq_sources(my_nrf_rx, NRF24L01_IRQ_RX_DR);
+      nrf_status = nrf24l01_get_fifo_status(my_nrf_rx, &fifo_status);
+      if(nrf_status != _nrf24l01_ok) break;
+    }
+
+    // Okuma sirasinda yeni paket geldiyse kalan FIFO'yu sonraki turda bosalt.
+    nrf_status = nrf24l01_get_fifo_status(my_nrf_rx, &fifo_status);
+    if(nrf_status == _nrf24l01_ok && fifo_status.rx_empty == false){
+      osThreadFlagsSet(nrf24l01RXtaskHandle, 0x01);
     }
   }
   /* USER CODE END startnrf24l01RXtask */
